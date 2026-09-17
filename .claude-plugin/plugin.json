@@ -1,0 +1,6 @@
+{
+  "name": "sourced-writing",
+  "description": "Record provenance at write time, and keep a verifiable chain of custody from source to deliverable. Built for numeric transcription into scientific and regulated documents.",
+  "version": "0.1.0",
+  "license": "MIT"
+}

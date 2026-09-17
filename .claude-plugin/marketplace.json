@@ -1,0 +1,11 @@
+{
+  "name": "sourced-writing",
+  "owner": {"name": "Joseph Chen"},
+  "plugins": [
+    {
+      "name": "sourced-writing",
+      "source": "./",
+      "description": "Provenance recorded at write time, with rounding, context, fidelity and append-only custody checks."
+    }
+  ]
+}
