@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+sys.path.insert(0, __file__.rsplit('/', 1)[0])
+import custody  # noqa: E402
 import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -95,7 +97,11 @@ def main():
 
         # Exactness, not rounding tolerance. Rounding is the defect, not the allowance:
         # 106.6% written as 107% cannot afterwards be found in the source that states it.
-        if norm(str(r['value'])) != norm(str(r['source_value'])):
+        # An interval written two ways is one interval. Endpoint equality, not string
+        # equality: both endpoints must match exactly, so this cannot conflate two
+        # different ranges.
+        if (norm(str(r['value'])) != norm(str(r['source_value']))
+                and not custody.same_interval(r['value'], r['source_value'])):
             if rounds_to(r['source_value'], r['value']):
                 problems.append(
                     f'ROUND  value {r["value"]!r} is a ROUNDED form of source_value '
@@ -105,7 +111,11 @@ def main():
                     f'VALUE  value {r["value"]!r} does not match source_value '
                     f'{r["source_value"]!r}')
 
-        if norm(str(num(r['source_value']) or r['source_value'])) not in norm(r['quote']):
+        sv_in_quote = norm(str(num(r['source_value']) or r['source_value'])) in norm(r['quote'])
+        if custody.endpoints_any(r['source_value']):
+            lo, hi = custody.endpoints_any(r['source_value'])
+            sv_in_quote = lo in norm(r['quote']) and hi in norm(r['quote'])
+        if not sv_in_quote:
             if norm(r['source_value']) not in norm(r['quote']):
                 problems.append(
                     f'VALUE  source_value {r["source_value"]!r} does not appear in the quote')

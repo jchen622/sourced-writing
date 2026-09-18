@@ -94,6 +94,70 @@ As a courtesy it still checks that value against the reference the author cited,
 `consistent`, `not_found` or `no_citation` in a separate `courtesy_check` object that can
 never be mistaken for provenance. The useful outcome is `not_found`.
 
+## The QC document
+
+Ask for one and it is generated from the records, not written by hand:
+
+```bash
+python3 skills/sourced-writing/scripts/qc_document.py \
+        --config sourcing.json --coverage coverage.json --out qc_generated.md
+```
+
+Ten sections, arrived at independently by two unrelated manuscripts:
+
+| # | Section | Source |
+|---|---|---|
+| 1 | Purpose, and the date links were verified | generated |
+| 2 | Source register, every source with a live link | generated |
+| 3 | Claim-to-source table, in manuscript order, with the source's own words | generated |
+| 4 | Guide to Authors compliance | **stub** |
+| 5 | Automated verification log | **stub** |
+| 5a | Provenance summary, by evidence path | generated |
+| 5b | Coverage, A / B / C / D | generated from your counts |
+| 6 | Discrepancy log | **stub** |
+| 7 | Interpretation log | **stub** |
+| 8 | Author information | **stub** |
+| 9 | Numeric worksheet, grouped by source document | generated |
+| 10 | Confidentiality attestation | **stub** |
+
+Sections needing judgment come out as **labelled stubs** and the run prints how many remain. A
+generator that invented a discrepancy log would produce exactly the confident-looking artifact
+this repo exists to prevent.
+
+`references/qc-document.md` explains what belongs in each section.
+
+## Coverage is closed
+
+Every value resolves to exactly one state. A value in none of them fails the build.
+
+| State | Meaning |
+|---|---|
+| **A** sourced | a verified record with a verbatim quote |
+| **B** author-entered | recorded as unsourced, with the reason |
+| **C** not a claim | an explicit confirmed declaration, with a stated reason |
+| **D** unproven | **named individually**, never reported only as a total |
+
+"188 unresolved" tells a reader nothing about whether those are structural labels or
+untraceable claims. D is a list, not a number.
+
+## A record, field by field
+
+```json
+{"id":"p3f9a1c204","value":"42.6%","as_printed":"42.6% higher in biomarker-positive patients",
+ "source_value":"42.6%","doc":"Falk 2021, J Appl Pharmacol","doc_path":"sources/falk2021.txt",
+ "ref":16,"locator":"Table 2, median marker row","url":"https://example.org/falk2021",
+ "quote":"Median marker (mg/L) 9.8 (0.4, 148) 20.25 (0.8, 184) 42.6","retrieved":"2026-09-18"}
+```
+
+| Field | Why it exists |
+|---|---|
+| `id` | content hash, so it survives text being added elsewhere and references being renumbered |
+| `value` / `source_value` | what the deliverable prints against what the source prints. Equal unless someone rounded, which is a defect |
+| `as_printed` | the surrounding clause, so a reader can judge whether the claim matches the quote |
+| `quote` | copied verbatim. Typed from memory, it is decorative |
+| `locator` | precise enough to find by eye. `#page=N` for a PDF, so clicking lands on the claim |
+| `doc_path` | a local extract, which is what makes the record machine-verifiable |
+
 ## The honest part
 
 `status` on a machine-generated record reads `candidate, not human-confirmed`, because that is

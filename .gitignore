@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
-provenance.jsonl
-provenance_current.jsonl
+provenance*.jsonl
+qc_generated*.md
+not_a_claim.json
+coverage.json

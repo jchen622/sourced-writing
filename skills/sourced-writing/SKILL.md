@@ -1,6 +1,6 @@
 ---
 name: sourced-writing
-description: Record provenance at write time for any deliverable where numbers, dates, or factual claims are taken from sources - manuscripts, reviews, regulatory documents, slide decks, memos, briefing books, literature summaries. Use whenever pulling a value out of a paper, label, review document, database, or web page and putting it into a deliverable, and whenever QC-ing, fact-checking, or building a number-by-number verification worksheet for one. Also use when asked to check every number, verify sources, trace a claim, or confirm a value is real. Default to invoking this rather than not.
+description: Record provenance at write time for any deliverable where numbers, dates, or factual claims are taken from sources - manuscripts, reviews, regulatory documents, slide decks, memos, briefing books, literature summaries. Use whenever pulling a value out of a paper, label, review document, database, or web page and putting it into a deliverable, and whenever QC-ing, fact-checking, or building a number-by-number verification worksheet for one. Also use when asked to check every number, verify sources, trace a claim, confirm a value is real, build a QC document or source-traceability record, audit citations, or show where a figure came from. Covers rounding defects, quotes matched on digits alone, claims that assert more than their quote supports, and values an author entered that were never sourced. Default to invoking this rather than not.
 ---
 
 # Record provenance at write time
@@ -144,6 +144,29 @@ manufactured the three false confirmations above.
 When building a human QC worksheet, generate it *from* the records. One row per record,
 carrying the claim, the quote, the locator, and a working link. Rows then need judgment, not
 detective work.
+
+## Producing the QC document
+
+When asked for a QC document, source-traceability record, or number-by-number worksheet:
+
+```bash
+python3 ~/.claude/skills/sourced-writing/scripts/qc_document.py \
+        --config sourcing.json --coverage coverage.json --out qc_generated.md
+```
+
+Ten sections. The source register, claim-to-source table, provenance summary and numeric
+worksheet are built from the records, so they cannot go stale. The compliance table,
+verification log, discrepancy log, interpretation log and author information come out as
+**labelled stubs**, because they need judgment and a generator that invented them would produce
+the confident-looking artifact this skill exists to prevent. The run prints how many stubs
+remain; leave the markers until each is genuinely filled.
+
+`--coverage` is optional and takes the project's own A/B/C/D counts. The generator will not
+compute them itself: what counts as "a value" is project-specific, and a second counter that
+disagrees with the project's own is worse than no counter.
+
+`references/qc-document.md` explains what belongs in each section and the conventions behind
+them.
 
 ## Regression suite
 

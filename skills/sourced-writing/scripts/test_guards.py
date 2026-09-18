@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from custody import (  # noqa: E402
     AMBIGUOUS, MIN_CONTEXT, assert_append_only, collapse_latest, content_key, fidelity_flags,
-    courtesy_check, locator_ok, resolve_source_value, split_value, stable_id, words,
+    courtesy_check, locator_ok, resolve_interval, resolve_source_value, split_value,
+    endpoints_any, same_interval, stable_id, unique_quantity, words,
 )
 
 PASS, FAIL = [], []
@@ -160,6 +161,98 @@ cc = courtesy_check("76.6", "%", [], words("anything"), ref=None)
 check("courtesy: nothing cited reads no_citation", cc["result"] == "no_citation", str(cc)[:110])
 
 check("courtesy result never carries a field named quote", "quote" not in cc)
+
+# --------------------------------------------------------------------------
+# 5c. Confidence intervals. Both bounds must be found close together; the co-occurrence of
+#     two specific decimals is the evidence, so a source containing them far apart, or only
+#     one of them, must not resolve.
+# --------------------------------------------------------------------------
+TBL = [(11, "CR, n (%) [95% CI] | 58 (61.7) [51.1-71.5] | 54 (60.0) [49.1-70.2] |")]
+LBL = [(2, "Complete response (CR), n (%) 54 (60) (95% CI) (49, 70)")]
+check("interval resolves against a dash-separated table cell",
+      (resolve_interval("95% CI 49.1 to 70.2", TBL, words("complete response")) or [None])[0]
+      == "49.1-70.2")
+check("interval resolves against a comma-separated label cell",
+      (resolve_interval("95% CI 49 to 70", LBL, words("complete response")) or [None])[0]
+      == "49, 70")
+check("an interval absent from the source does not resolve",
+      resolve_interval("95% CI 11.1 to 22.2", TBL, words("x")) is None)
+check("a non-interval value is not treated as one",
+      resolve_interval("44.4%", TBL, words("x")) is None)
+
+FAR = [(9, "The lower value was 49.1 in the first cohort. " + ("filler text " * 12) +
+           "A separate analysis reported 70.2 in an unrelated population.")]
+check("bounds far apart in the source do not resolve as an interval",
+      resolve_interval("95% CI 49.1 to 70.2", FAR, words("cohort")) is None,
+      str(resolve_interval("95% CI 49.1 to 70.2", FAR, words("cohort")))[:90])
+check("only the lower bound present does not resolve",
+      resolve_interval("95% CI 51.1 to 99.9", TBL, words("complete response")) is None)
+
+# --------------------------------------------------------------------------
+# 5d. Ranges. "1.6 to 45 mg" is not a number with the unit "to 45 mg". Treating it that way
+#     found 1.61 in the source as a "rounding parent" of 1.6 and asserted the manuscript had
+#     rounded, which is a fabricated defect on a value that was never a single number.
+# --------------------------------------------------------------------------
+num, unit = split_value("1.6 to 45 mg")
+check("a range is not split into a number and a bogus unit", unit is None or "to" not in unit,
+      "split to (%r, %r)" % (num, unit))
+
+RNG = [(6, "The compound exhibited dose-proportional pharmacokinetics over the dose range "
+           "of 1.6 mg to 45 mg following subcutaneous administration.")]
+got = resolve_interval("1.6 to 45 mg", RNG, words("dose proportional range subcutaneous"))
+check("a bare range resolves when both endpoints sit together", got is not None,
+      str(got)[:100])
+
+DAYS = [(8, "predicted cumulative area under the concentration-time curve over 0-84 days")]
+check("a day range resolves against a hyphenated source form",
+      resolve_interval("0 to 84 days", DAYS, words("cumulative area under curve")) is not None)
+
+SPLIT = [(9, "The value 1.6 appeared in the first cohort. " + ("filler " * 20) +
+             "Separately, 45 was observed in an unrelated analysis.")]
+check("endpoints far apart do not resolve as a range",
+      resolve_interval("1.6 to 45 mg", SPLIT, words("cohort")) is None,
+      str(resolve_interval("1.6 to 45 mg", SPLIT, words("cohort")))[:90])
+
+check("two renderings of one interval compare equal",
+      same_interval("0 to 84 days", "0-84") and same_interval("95% CI 49.1 to 70.2", "49.1-70.2"))
+check("different intervals never compare equal",
+      not same_interval("0 to 84 days", "0-42") and not same_interval("1.6 to 45 mg", "1.6 to 44 mg"))
+check("a non-interval never compares equal to an interval",
+      not same_interval("44.4%", "0-84"))
+# The renderings a source actually produces, which broke the first attempt at this.
+for src in ("70, 88", "63 \u2012 84", "1.6 mg to 45", "49.1\u201370.2", "1.54\u22122.36"):
+    check("source rendering %r parses to endpoints" % src, endpoints_any(src) is not None)
+check("manuscript and label renderings of one interval agree",
+      same_interval("95% CI 70 to 88", "70, 88") and same_interval("63 to 84 days", "63 \u2012 84")
+      and same_interval("1.6 to 45 mg", "1.6 mg to 45"))
+check("strict endpoints still refuses a comma pair, so routing is unchanged",
+      __import__("custody").endpoints("70, 88") is None)
+
+# --------------------------------------------------------------------------
+# 5e. Unique quantity: a SECOND evidence path, not a lowered threshold.
+#
+#     A value carrying a unit that occurs exactly once in the cited document is uniquely
+#     identified by that document, however little prose surrounds it. Terse sentences
+#     ("SC bioavailability is 89.8%.") offer almost nothing to overlap on, yet "89.8%"
+#     appears once in the whole label. The strictness lives in the conditions: a unit is
+#     required, and exactly one occurrence is required.
+# --------------------------------------------------------------------------
+ONE = [(6, "Absolute bioavailability Bioavailability 89.8% following subcutaneous injection.")]
+got = unique_quantity("89.8", "%", ONE)
+check("a unit-bearing value occurring exactly once qualifies", got is not None, str(got)[:90])
+
+TWICE = [(6, "Rate was 89.8% in cohort A. A separate analysis reported 89.8% in cohort B.")]
+check("the same quantity twice does NOT qualify", unique_quantity("89.8", "%", TWICE) is None)
+
+BARE = [(2, "A total of 90 patients were enrolled. Of these, 90 were evaluable.")]
+check("a bare number never qualifies, however unique",
+      unique_quantity("90", None, [(2, "Exactly 90 patients were enrolled.")]) is None)
+
+check("a value absent from the source does not qualify",
+      unique_quantity("77.7", "%", ONE) is None)
+
+OTHERUNIT = [(6, "Half-life was 89.8 days in the population.")]
+check("a unit mismatch does not qualify", unique_quantity("89.8", "%", OTHERUNIT) is None)
 
 # --------------------------------------------------------------------------
 # 6. Append-only history.

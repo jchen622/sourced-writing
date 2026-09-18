@@ -83,11 +83,143 @@ def resolve_source_value(value, unit, sources, want, siblings=()):
     return None
 
 
+CI = re.compile(r"^(\d+)\s*%\s*CI\s*([\d.]+)\s*(?:to|-|\u2013|,)\s*([\d.]+)$", re.I)
+# A bare range: "1.6 to 45 mg", "0 to 84 days", "63 to 84 days". Same two-endpoint evidence
+# as a confidence interval, and the same reason it must not go down the number-and-unit path.
+RANGE = re.compile(r"^([\d.]+)\s*(?:to|\u2013|-)\s*([\d.]+)\s*([A-Za-z\u00b5\u00b7/%]*)$")
+
+
+def endpoints(value):
+    """(lo, hi) for a confidence interval or a bare range, else None."""
+    s = str(value).strip()
+    m = CI.match(s)
+    if m:
+        return m.group(2), m.group(3)
+    m = RANGE.match(s)
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+# Separator characters a source may use between two endpoints, including the figure dash
+# and en dash that PDF extraction produces.
+_SEP = r"(?:to|\u2010|\u2011|\u2012|\u2013|\u2014|\u2212|-|,)"   # incl. MINUS SIGN from PDFs
+_LOOSE = re.compile(r"^([\d.]+)\s*[A-Za-z\u00b5/%]*\s*" + _SEP + r"\s*([\d.]+)\s*[A-Za-z\u00b5\u00b7/%]*$")
+
+
+def endpoints_any(value):
+    """Endpoints from ANY rendering, including "70, 88" and "1.6 mg to 45".
+
+    Deliberately separate from `endpoints`, which stays strict because it decides ROUTING:
+    whether a manuscript value is a range at all. This looser parser is used only to COMPARE
+    two renderings that are already known to describe the same thing, where a permissive
+    parse cannot cause a mismatch to pass, only a spurious mismatch to be avoided.
+    """
+    strict = endpoints(value)
+    if strict:
+        return strict
+    m = _LOOSE.match(str(value).strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def same_interval(a, b):
+    """True when two renderings pin the same endpoints.
+
+    "0 to 84 days" and "0-84" are the same interval written two ways, as are
+    "95% CI 49.1 to 70.2" and "49.1-70.2". This is endpoint equality, the same documented
+    class of tolerance as the three date forms: it cannot make two different intervals look
+    alike, because both endpoints must match exactly.
+    """
+    ea, eb = endpoints_any(a), endpoints_any(b)
+    if not ea or not eb:
+        return False
+    return [dec(x) for x in ea] == [dec(x) for x in eb]
+
+
+def resolve_interval(value, sources, want, span=48):
+    """Confirm a confidence interval by finding BOTH bounds close together in the source.
+
+    A deliverable writes "95% CI 49.1 to 70.2"; sources write "[49.1-70.2]", "(49.1, 70.2)"
+    or "95% CI: 49.1-70.2". Splitting that into a number and a unit gives the nonsense pair
+    ("95", "% CI 49.1 to 70.2"), so intervals were never resolvable at all and went straight
+    to unproven.
+
+    Requiring the two bounds within a short span is what makes this safe: two specific
+    decimals adjacent in one clause is not something that happens by coincidence, which is
+    the same reason the scorer counts co-occurring figures.
+
+    Returns (source_text, score, window, ref) or None.
+    """
+    pair = endpoints(value)
+    if not pair:
+        return None
+    lo, hi = pair
+    best = None
+    for ref, text in sources:
+        for mm in re.finditer(r"(?<![\d.])" + re.escape(lo) + r"(?![\d.])", text):
+            tail = text[mm.end():mm.end() + span]
+            hm = re.search(r"(?<![\d.])" + re.escape(hi) + r"(?![\d.])", tail)
+            if not hm:
+                continue
+            win = text[max(0, mm.start() - 200):mm.end() + span + 200]
+            score = len(want & words(win)) + 2      # both bounds present is itself evidence
+            if best is None or score > best[1]:
+                best = (text[mm.start():mm.end() + hm.end()], score, win, ref)
+    return best
+
+
+def unique_quantity(value, unit, sources):
+    """A second, independent evidence path: one occurrence of a unit-bearing quantity.
+
+    Contextual scoring needs prose to overlap on, and some claims have almost none. An
+    Information Card reads "SC bioavailability is 89.8%." and offers one content word, while
+    "89.8%" appears exactly once in the entire cited label. Refusing that is not rigour, it
+    is the wrong test for the evidence available.
+
+    The rigour lives in the conditions, both required:
+      * the value carries a UNIT, so it is a specific quantity rather than a bare integer
+        that means twenty different things in one document
+      * it occurs EXACTLY ONCE in the cited source
+
+    A bare number never qualifies no matter how unique, because the reason bare numbers are
+    dangerous is not frequency but ambiguity of kind. Returns (window, ref) or None.
+    """
+    if not unit:
+        return None
+    # Tolerate the character variants PDF and SPL extraction produce, without changing the
+    # string length, so offsets stay valid against the original text we slice the window from.
+    u = re.escape(unit)
+    for a_, b_ in ((r"\u00b5", "[\u00b5\u03bc]"), (r"\u03bc", "[\u00b5\u03bc]"),
+                   (r"\ ", r"\s*"), (r"\-", "[-\u2010\u2011\u2012\u2013\u2014\u2212]")):
+        u = u.replace(a_, b_)
+    pat = re.compile(r"(?<![\d.])" + re.escape(str(value)) + r"\s*" + u, re.I)
+    hits = []
+    for ref, text in sources:
+        for m in pat.finditer(text):
+            hits.append((text, m.start(), m.end(), ref))
+            if len(hits) > 1:
+                return None
+    if len(hits) != 1:
+        return None
+    text, a, b, ref = hits[0]
+    return re.sub(r"\s+", " ", text[max(0, a - 200):b + 200]).strip(), ref
+
+
 def split_value(value: str):
-    """('4.2 days') -> ('4.2', 'days'). Unit is None when the value is bare."""
-    m = re.match(r"^\s*([\d.,]+)\s*(.*)$", str(value))
+    """('4.2 days') -> ('4.2', 'days'). Unit is None when the value is bare.
+
+    A range is NOT a number with a unit. Splitting "1.6 to 45 mg" into ("1.6", "to 45 mg")
+    sent it down the rounding path, where the source's "1.61" was reported as the precise
+    parent the manuscript had rounded: a fabricated defect on a value that is not a single
+    number at all. Ranges return their whole text and no unit, so the caller routes them to
+    `resolve_interval` instead.
+    """
+    s = str(value).strip()
+    if endpoints(s):
+        return s, None
+    m = re.match(r"^\s*([\d.,]+)\s*(.*)$", s)
     if not m:
-        return str(value), None
+        return s, None
     return m.group(1), (m.group(2).strip() or None)
 
 
