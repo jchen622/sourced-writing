@@ -96,12 +96,17 @@ never be mistaken for provenance. The useful outcome is `not_found`.
 
 ## The QC document
 
-Ask for one and it is generated from the records, not written by hand:
+**Offered, never assumed.** When the skill runs a QC pass it asks once whether you want it.
+Many projects already keep their own QC document and a silent second one is confusing.
 
 ```bash
 python3 skills/sourced-writing/scripts/qc_document.py \
-        --config sourcing.json --coverage coverage.json --out qc_generated.md
+        --config sourcing.json --coverage coverage.json \
+        --requirements requirements.json --metrics metrics.json
 ```
+
+Writes `sourced-writing-qc.md`, named so it is never confused with your own QC file, and it
+**refuses to overwrite any file it did not generate**.
 
 Ten sections, arrived at independently by two unrelated manuscripts:
 
@@ -109,20 +114,30 @@ Ten sections, arrived at independently by two unrelated manuscripts:
 |---|---|---|
 | 1 | Purpose, and the date links were verified | generated |
 | 2 | Source register, every source with a live link | generated |
-| 3 | Claim-to-source table, in manuscript order, with the source's own words | generated |
-| 4 | Guide to Authors compliance | **stub** |
-| 5 | Automated verification log | **stub** |
+| 3 | Claim-to-source table, in document order, with the source's own words | generated |
+| 4 | Submission requirements compliance | from your guide |
+| 5 | Automated verification log | stub |
 | 5a | Provenance summary, by evidence path | generated |
-| 5b | Coverage, A / B / C / D | generated from your counts |
-| 6 | Discrepancy log | **stub** |
-| 7 | Interpretation log | **stub** |
-| 8 | Author information | **stub** |
+| 5b | Coverage, A / B / C / D | from your counts |
+| 6 | Discrepancy log | stub |
+| 7 | Interpretation log | stub |
+| 8 | Author information | stub |
 | 9 | Numeric worksheet, grouped by source document | generated |
-| 10 | Confidentiality attestation | **stub** |
+| 10 | Confidentiality attestation | stub |
 
-Sections needing judgment come out as **labelled stubs** and the run prints how many remain. A
+Sections needing judgment come out as labelled stubs and the run prints how many remain. A
 generator that invented a discrepancy log would produce exactly the confident-looking artifact
 this repo exists to prevent.
+
+**Section 4 is venue-neutral.** A journal, a health authority, a conference and an internal
+template impose different limits, and this tool assumes none. With no requirements supplied it
+asks for them by name: which text the word limit covers and what it excludes, the abstract
+limit, the reference cap and whether table-only citations count, the figure and table cap, and
+any prescribed section order.
+
+It will not compute coverage, and it will not decide whether a measured value satisfies a
+limit. Both are project and venue specific, and a second counter that disagrees with yours is
+worse than none.
 
 `references/qc-document.md` explains what belongs in each section.
 

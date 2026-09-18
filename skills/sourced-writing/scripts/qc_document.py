@@ -34,6 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import custody  # noqa: E402
 
 STUB = "> **UNFILLED.** %s"
+# Written into every generated file. The tool refuses to overwrite anything lacking it,
+# so pointing --out at a hand-maintained QC document cannot destroy it.
+MARKER = "sourced-writing-qc-document"
 
 
 def load_config(p: Path):
@@ -75,7 +78,8 @@ def esc(s):
     return re.sub(r"\s+", " ", str(s or "")).replace("|", "/").strip()
 
 
-def build(cfg, base, recs, src_name, coverage=None):
+def build(cfg, base, recs, src_name, coverage=None, requirements=None, metrics=None):
+    metrics = metrics or {}
     md_path = base / cfg.get("manuscript", "manuscript_full.md")
     md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
     refs = reference_list(md, cfg.get("references_heading", "## References"))
@@ -92,7 +96,12 @@ def build(cfg, base, recs, src_name, coverage=None):
     o = []
     A = o.append
 
-    A("# Source traceability and QC record\n")
+    A("# Sourced-writing skill QC document\n")
+    A("<!-- %s: generated file, safe to overwrite. A project's own hand-maintained QC\n"
+      "document is a different file and this tool will not write over it. -->\n" % MARKER)
+    A("Produced by the `sourced-writing` skill on request. It is **not** a substitute for a\n"
+      "project's own QC document: it records what the provenance data supports, and marks\n"
+      "everything else as unfilled.\n")
     A("Generated %s from `%s`. Regenerate after any change; the populated sections are "
       "derived from the records and go stale otherwise.\n" % (today, src_name or "no records"))
 
@@ -144,7 +153,7 @@ def build(cfg, base, recs, src_name, coverage=None):
         for r in rows:
             loc = esc(r.get("locator"))
             q = esc(r.get("quote"))
-            cell = (loc + (' &mdash; "%s"' % q[:220] if q else "")) or "no locator recorded"
+            cell = (loc + (' \u00b7 verbatim: "%s"' % q[:220] if q else "")) or "no locator recorded"
             A("| `%s` | %s | %s | %s |" % (esc(r.get("value")), esc(r.get("as_printed"))[:150],
                                            esc(r.get("doc"))[:60], cell[:320]))
         A("")
@@ -163,15 +172,54 @@ def build(cfg, base, recs, src_name, coverage=None):
                 esc(r.get("value")), esc(r.get("as_printed"))[:120],
                 esc(r.get("unsourced_reason"))[:90],
                 "%s%s" % (cc.get("result", "not checked"),
-                          (' &mdash; "%s"' % esc(cc.get("passage"))[:130]) if cc.get("passage") else "")))
+                          (', passage: "%s"' % esc(cc.get("passage"))[:130]) if cc.get("passage") else "")))
         A("")
 
     # ---------------------------------------------------------------- 4
-    A("## 4. Guide to Authors compliance\n")
-    stubs.append("Guide to Authors compliance")
-    A(STUB % "Fill from the journal's own limits: word counts, reference cap, figure and "
-             "table cap, prescribed section order. State each limit, the measured value, and "
-             "whether it is met.\n")
+    # Venue-neutral on purpose. A journal, a health authority, a conference and an internal
+    # template all impose different limits, and this skill has no business assuming any of
+    # them. The requirements come from whoever is submitting.
+    A("## 4. Submission requirements compliance\n")
+    req = cfg.get("requirements") or requirements or {}
+    limits = req.get("limits") or []
+    if limits:
+        if req.get("venue"):
+            A("Requirements as set by **%s**%s.\n"
+              % (req["venue"], ", from %s" % req["source"] if req.get("source") else ""))
+        A("| Requirement | Limit | Measured | Met |")
+        A("|---|---|---|---|")
+        for lim in limits:
+            item = esc(lim.get("item"))
+            got = lim.get("measured", metrics.get(lim.get("key", item), ""))
+            met = lim.get("met", "" if got == "" else "")
+            A("| %s | %s | %s | %s |" % (item, esc(lim.get("limit")),
+                                         esc(got) if got != "" else "not measured",
+                                         esc(met) if met != "" else "\u2610"))
+        A("")
+        missing = [l for l in limits
+                   if l.get("measured", metrics.get(l.get("key", l.get("item")), "")) == ""]
+        if missing:
+            stubs.append("measured values for %d requirement(s)" % len(missing))
+            A(STUB % ("%d requirement(s) have no measured value. Measure them with the "
+                      "project's own counters and supply them with --metrics, rather than "
+                      "letting this tool invent a second counter that disagrees.\n"
+                      % len(missing)))
+    else:
+        stubs.append("submission requirements")
+        A(STUB % "No requirements were supplied, and this tool does not assume a venue.\n")
+        A("Ask whoever is submitting for the applicable guide, then answer these:\n")
+        A("- which body of text the word limit applies to, and what it excludes")
+        A("- the abstract or summary limit, if any")
+        A("- the reference cap, and whether references cited only in tables count")
+        A("- the figure and table cap, and whether supplementary items count")
+        A("- any prescribed section order or required sections")
+        A("- anything else the venue enforces mechanically\n")
+        A("Supply them as a `requirements` block in the config, or with `--requirements`:\n")
+        A("```json\n{\"venue\": \"...\", \"source\": \"...\",\n"
+          " \"limits\": [{\"item\": \"Body words\", \"limit\": \"2000 to 3000\", "
+          "\"key\": \"body_words\"},\n"
+          "             {\"item\": \"References\", \"limit\": \"25 max\", "
+          "\"key\": \"references\"}]}\n```\n")
 
     # ---------------------------------------------------------------- 5
     A("## 5. Automated verification log\n")
@@ -236,7 +284,7 @@ def build(cfg, base, recs, src_name, coverage=None):
             n += 1
             A("| ☐ | %d | `%s` | %s | %s | %s |" % (
                 n, esc(r.get("value")), esc(r.get("as_printed"))[:110],
-                esc(r.get("quote"))[:170] or "&mdash;", esc(r.get("locator"))[:90]))
+                esc(r.get("quote"))[:170] or "no quote recorded", esc(r.get("locator"))[:90]))
         A("")
 
     # ---------------------------------------------------------------- 10
@@ -247,7 +295,34 @@ def build(cfg, base, recs, src_name, coverage=None):
     stubs.append("confidentiality attestation confirmation")
     A(STUB % "Confirm the statement above, or list any exception and its approval.\n")
 
-    return "\n".join(o) + "\n", stubs, len(recs)
+    text = "\n".join(o) + "\n"
+    check_tables(text)
+    return text, stubs, len(recs)
+
+
+def check_tables(text):
+    """Every row in a markdown table must have its header's column count.
+
+    A separator character written into a cell after escaping adds a column and breaks the
+    table silently: it still renders, just wrongly, which is the failure mode this whole
+    skill is about. 281 rows broke this way once.
+    """
+    header, bad = None, []
+    for i, line in enumerate(text.split("\n"), 1):
+        if not line.startswith("|"):
+            header = None
+            continue
+        n = line.count("|")
+        if header is None:
+            header = n
+        elif set(line.replace("|", "").strip()) <= set("-: "):
+            continue
+        elif n != header:
+            bad.append((i, n, header, line[:90]))
+    if bad:
+        raise AssertionError(
+            "%d table row(s) have the wrong column count, most likely a raw '|' in a cell:\n"
+            % len(bad) + "\n".join("  line %d: %d columns, header has %d: %s" % b for b in bad[:5]))
 
 
 def main():
@@ -255,7 +330,12 @@ def main():
     ap.add_argument("--config", default="sourcing.json")
     ap.add_argument("--records", help="override the records file")
     ap.add_argument("--coverage", help="JSON with A/B/C/D counts from the project's own counter")
-    ap.add_argument("--out", default="qc_generated.md")
+    ap.add_argument("--requirements", help="JSON of the venue's limits; the tool assumes none")
+    ap.add_argument("--metrics", help="JSON of measured values, keyed to each requirement's key")
+    ap.add_argument("--out", default="sourced-writing-qc.md",
+                    help="named distinctly so it is never confused with, or written over,\n                          a project's own QC document")
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite an output file that this tool did not generate")
     a = ap.parse_args()
 
     cfgp = Path(a.config)
@@ -269,12 +349,26 @@ def main():
         return 2
     cov = json.loads(Path(a.coverage).read_text(encoding="utf-8")) if a.coverage else None
 
-    text, stubs, n = build(cfg, base, recs, src, cov)
-    Path(a.out).write_text(text, encoding="utf-8")
+    req = json.loads(Path(a.requirements).read_text(encoding="utf-8")) if a.requirements else None
+    met = json.loads(Path(a.metrics).read_text(encoding="utf-8")) if a.metrics else None
+    text, stubs, n = build(cfg, base, recs, src, cov, req, met)
+
+    out = Path(a.out)
+    if out.exists() and not a.force:
+        existing = out.read_text(encoding="utf-8", errors="replace")[:600]
+        if MARKER not in existing:
+            print("REFUSING to overwrite %s: it was not generated by this tool and may be a "
+                  "hand-maintained QC document. Choose another --out, or pass --force if you "
+                  "are certain." % out)
+            return 2
+    out.write_text(text, encoding="utf-8")
     print("wrote %s from %d records" % (a.out, n))
     print("UNFILLED sections needing judgment: %d" % len(stubs))
     for s in stubs:
         print("   - %s" % s)
+    if not (cfg.get("requirements") or a.requirements):
+        print("no venue requirements supplied: section 4 asks for them rather than assuming "
+              "a journal. Pass --requirements once you have the applicable guide.")
     if not cov:
         print("coverage table omitted: pass --coverage with the project's own A/B/C/D counts "
               "rather than letting this tool invent a second, disagreeing counter")

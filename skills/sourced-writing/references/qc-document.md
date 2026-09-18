@@ -27,7 +27,7 @@ a checker can work down the deliverable rather than hunt. The location column ca
 source's **own words**:
 
 > | Value | Claim as printed | Source | Location and verbatim quote |
-> | `42.6%` | 42.6% higher in biomarker-positive patients | Falk 2021 | Table 2, median marker row — "Median marker (mg/L) 9.8 (0.4, 148) 20.25 (0.8, 184) 42.6" |
+> | `42.6%` | 42.6% higher in biomarker-positive patients | Falk 2021 | Table 2, median marker row · verbatim: "Median marker (mg/L) 9.8 (0.4, 148) 20.25 (0.8, 184) 42.6" |
 
 A paraphrase here defeats the purpose. The reader is checking whether the deliverable says
 what the source says, and they cannot do that against your summary of it.
@@ -37,8 +37,18 @@ reason**. No quote is attached, because only the author knows the origin. A cour
 report whether the cited reference contains the value, kept in its own field so it can never be
 mistaken for provenance.
 
-**4. Guide to Authors compliance.** Each limit the venue sets, the measured value, and whether
-it is met. Measured, never typed by hand.
+**4. Submission requirements compliance.** Venue-neutral by design: a journal, a health
+authority, a conference and an internal template all impose different limits, and this skill
+assumes none of them. **Ask whoever is submitting for the applicable guide.** With no
+requirements supplied the section asks for them by name rather than emitting a generic stub:
+which text the word limit covers and what it excludes, the abstract limit, the reference cap
+and whether table-only citations count, the figure and table cap, and any prescribed section
+order.
+
+Supply them as a `requirements` block in the config or with `--requirements`, and the measured
+values with `--metrics`. The generator fills the limits and leaves a checkbox in the Met
+column, because deciding whether "3,225" satisfies "2,000 to 3,000, excluding abstract and
+references" is a reading of the guide, not a comparison.
 
 **5. Automated verification log.** What each gate checked, what it found, and when it ran.
 Include the checks that passed: a reader needs to know what was examined, not only what broke.

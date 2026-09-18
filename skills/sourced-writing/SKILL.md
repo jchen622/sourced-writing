@@ -145,28 +145,45 @@ When building a human QC worksheet, generate it *from* the records. One row per 
 carrying the claim, the quote, the locator, and a working link. Rows then need judgment, not
 detective work.
 
-## Producing the QC document
+## The QC document: offer it, never assume it
 
-When asked for a QC document, source-traceability record, or number-by-number worksheet:
+**Do not generate this automatically.** When this skill is used for a QC, fact-check, or
+verification pass, offer it once:
+
+> "Do you want the sourced-writing QC document generated?"
+
+Ask once per session. If the answer is no, do not ask again. Many projects already keep their
+own QC document, and quietly producing a second one is confusing rather than helpful.
 
 ```bash
 python3 ~/.claude/skills/sourced-writing/scripts/qc_document.py \
-        --config sourcing.json --coverage coverage.json --out qc_generated.md
+        --config sourcing.json --coverage coverage.json \
+        --requirements requirements.json --metrics metrics.json
 ```
 
+It writes `sourced-writing-qc.md`, named so it is never mistaken for a project's own QC file,
+and it **refuses to overwrite any file it did not generate**. Pointing `--out` at a
+hand-maintained QC document is rejected rather than obeyed.
+
 Ten sections. The source register, claim-to-source table, provenance summary and numeric
-worksheet are built from the records, so they cannot go stale. The compliance table,
-verification log, discrepancy log, interpretation log and author information come out as
-**labelled stubs**, because they need judgment and a generator that invented them would produce
-the confident-looking artifact this skill exists to prevent. The run prints how many stubs
-remain; leave the markers until each is genuinely filled.
+worksheet are built from the records, so they cannot go stale. The verification log,
+discrepancy log, interpretation log and author information come out as **labelled stubs**,
+because they need judgment and a generator that invented them would produce the
+confident-looking artifact this skill exists to prevent. The run prints how many stubs remain.
 
-`--coverage` is optional and takes the project's own A/B/C/D counts. The generator will not
-compute them itself: what counts as "a value" is project-specific, and a second counter that
-disagrees with the project's own is worse than no counter.
+**Section 4 is venue-neutral. Ask for the guide.** A journal, a health authority, a conference
+and an internal template all impose different limits, and this skill assumes none of them.
+With no `requirements` supplied, the section asks for them by name: which text the word limit
+covers and what it excludes, the abstract limit, the reference cap and whether table-only
+citations count, the figure and table cap, and any prescribed section order. Ask whoever is
+submitting, then pass them in.
 
-`references/qc-document.md` explains what belongs in each section and the conventions behind
-them.
+Two things the generator will not do, both for the same reason. It will not compute coverage,
+and it will not decide whether a measured value satisfies a limit. What counts as "a value"
+and what a limit really covers are project and venue specific, and a second counter that
+disagrees with the project's own is worse than no counter. Pass `--coverage` and `--metrics`.
+
+`references/qc-document.md` explains what belongs in each section.
 
 ## Regression suite
 
