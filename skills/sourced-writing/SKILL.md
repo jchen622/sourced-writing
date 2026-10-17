@@ -1,6 +1,6 @@
 ---
 name: sourced-writing
-description: Record provenance at write time for any deliverable where numbers, dates, or factual claims are taken from sources - manuscripts, reviews, regulatory documents, slide decks, memos, briefing books, literature summaries. Use whenever pulling a value out of a paper, label, review document, database, or web page and putting it into a deliverable, and whenever QC-ing, fact-checking, or building a number-by-number verification worksheet for one. Also use when asked to check every number, verify sources, trace a claim, confirm a value is real, build a QC document or source-traceability record, audit citations, or show where a figure came from. Covers rounding defects, quotes matched on digits alone, claims that assert more than their quote supports, and values an author entered that were never sourced. Default to invoking this rather than not.
+description: Record provenance at write time for any deliverable where numbers, dates, verbatim quotes, or factual claims are taken from sources - manuscripts, reviews, regulatory documents, slide decks, memos, briefing books, literature summaries. Use whenever ANY primary source is open, not only when a number is in play: transcribing a verbatim quote, an agency position, a meeting outcome or a date out of a source document counts, and so does attaching source links or citations to a slide. Use whenever pulling a value out of a paper, label, review document, database, or web page and putting it into a deliverable, and whenever QC-ing, fact-checking, or building a number-by-number verification worksheet for one. Also use when asked to check every number, verify sources, trace a claim, confirm a value is real, build a QC document or source-traceability record, audit citations, or show where a figure came from. Covers rounding defects, quotes matched on digits alone, claims that assert more than their quote supports, and values an author entered that were never sourced. Default to invoking this rather than not.
 ---
 
 # Record provenance at write time
@@ -56,6 +56,14 @@ action that writes the text**, never in a later cleanup pass.
 | `retrieved` | yes | ISO date |
 
 Use `scripts/provenance.py` so recording is one call and the schema cannot drift.
+
+**A quote needs a record exactly as much as a number does, and one citation per page is
+not a record.** A slide, figure or table carrying quotes from four documents needs four
+locators. Where a deliverable gives a single source link per page, build that link *from*
+the record rather than choosing it by hand: a page quoting one document while linking
+another is not caught by reading the page, only by clicking through, and the reader doing
+the clicking is the last line of defence rather than the first. The cheap structural fix is
+to generate the quote text and its link from the same record, so they cannot diverge.
 
 ## Four rules that make it hold
 
@@ -194,6 +202,35 @@ python3 ~/.claude/skills/sourced-writing/scripts/test_guards.py -v
 Every case is a defect that once shipped, or a negative control proving a guard has not been
 tuned into uselessness. Run it after any change to the guards. A gate that has never failed is
 not evidence of anything, so each case is written to fail before its fix and pass after.
+
+**The suite is necessary and it is not sufficient.** Two fixes to `check_rounding.py` passed all
+57 cases and were wrong on real data: a boundary guard written `(?![\d,])` also blocked the
+comma in "0.940 (0.908, 0.974)", costing 12 confirmed quotes and inventing a defect, and a unit
+guard read the "and" in "10.9 and 10.1 months" as a conflicting unit, rejecting three true
+quotes. Neither is reachable from a fixture, because both depend on how real sources punctuate.
+
+## Corpus gate: diff the whole report against real registers
+
+```bash
+python3 ~/.claude/skills/sourced-writing/scripts/corpus_gate.py --snapshot   # before a change
+python3 ~/.claude/skills/sourced-writing/scripts/corpus_gate.py --check      # after
+```
+
+Runs `verify_provenance` and `check_rounding --unmatched` over your registered deliverables and
+refuses any difference you have not explained. **It compares whole reports, not headline
+counts**, because a change can move individual values between buckets while the totals hold.
+
+Two things it separates, and the separation is the point:
+
+- **Report changed, inputs identical.** The code did something. Explain every line before
+  accepting it, then re-snapshot.
+- **Inputs changed.** The corpus itself moved, so the diff says nothing about the code. The gate
+  prints `INPUTS CHANGED` and names the files. This is common: a live manuscript shifted
+  `exact quotes confirmed` from 111 to 176 between two runs of identical code during one
+  afternoon, and a gate that reported that as a scorer regression would be ignored within a week.
+
+The registry is **local and never committed**: it names confidential deliverables. Copy
+`corpus_gate.example.json` to `corpus_gate.local.json` and point it at your own registers.
 
 ## Starting a new deliverable
 
