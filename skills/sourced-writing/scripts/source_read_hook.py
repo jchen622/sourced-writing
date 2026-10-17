@@ -23,6 +23,7 @@ Wire it up in ~/.claude/settings.json:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
@@ -36,7 +37,32 @@ DOMAINS = re.compile(
     r"ascopubs|aacrjournals|biorxiv|medrxiv|osf\.io|zenodo)", re.I)
 
 # A local path that looks like a held source rather than working code.
-PATHS = re.compile(r"(^|/)(sources?|references?|literature|labels?|sourcedocs)/", re.I)
+#
+# `text/`, `extracts/` and `corpus/` matter as much as `sources/`. A project that
+# downloads PDFs into sources/ but writes the extracted plain text to text/ will
+# take every quote from the extract, so a hook watching only sources/ stays
+# silent through the entire job. That happened on a real review. A corpus
+# directory is a held source whatever it is named.
+PATHS = re.compile(
+    r"(^|/)(sources?|references?|literature|labels?|sourcedocs|text|extracts?|corpus|"
+    r"transcripts?|minutes|harvest)/", re.I)
+
+# Document management and collaboration systems are sources too. In regulated
+# industry a value arrives from a company document repository far more often
+# than from a journal, and reading one through its API looks nothing like
+# reading a PDF.
+#
+# Site-specific hostnames belong in the environment, not in this file: set
+# SOURCED_WRITING_SOURCE_HOSTS to a comma-separated list (for example an
+# intranet search host and a document-viewer host) and they are matched too.
+INTERNAL = re.compile(
+    r"(veevavault\.com|sharepoint\.com|sharepoint-df\.com|box\.com|egnyte\.com|"
+    r"confluence|docs\.google\.com|drive\.google\.com|"
+    r"googleapis\.com/(?:drive|docs|sheets|slides))", re.I)
+
+_extra = [h.strip() for h in os.environ.get("SOURCED_WRITING_SOURCE_HOSTS", "").split(",")
+          if h.strip()]
+EXTRA = re.compile("|".join(re.escape(h) for h in _extra), re.I) if _extra else None
 
 REMINDER = (
     "sourced-writing: a value leaving this source needs a provenance record written in the "
@@ -65,7 +91,8 @@ def main() -> int:
     t = target(tool, payload.get("tool_input", {}) or {})
     if not t:
         return 0
-    if DOMAINS.search(t) or PATHS.search(t):
+    if (DOMAINS.search(t) or PATHS.search(t) or INTERNAL.search(t)
+            or (EXTRA is not None and EXTRA.search(t))):
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
