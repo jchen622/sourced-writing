@@ -90,8 +90,15 @@ def build(cfg, base, recs, src_name, coverage=None, requirements=None, metrics=N
             urls.setdefault(int(r["ref"]), r.get("url", ""))
             docs.setdefault(int(r["ref"]), r.get("doc", ""))
 
+    # `status: baseline, ...` marks a register opened on an already-drafted deliverable, where
+    # the origin was never witnessed (SKILL.md, "Starting from a drafted document"). Those are
+    # not sourced records and must not be counted as if they were, the same as origin=author.
+    def _baseline(r):
+        return str(r.get("status", "")).strip().casefold().startswith("baseline")
+
     author = [r for r in recs if r.get("origin") == "author"]
-    sourced = [r for r in recs if r.get("origin") != "author"]
+    baseline = [r for r in recs if r.get("origin") != "author" and _baseline(r)]
+    sourced = [r for r in recs if r.get("origin") != "author" and not _baseline(r)]
     stubs = []
     o = []
     A = o.append
@@ -175,6 +182,21 @@ def build(cfg, base, recs, src_name, coverage=None, requirements=None, metrics=N
                           (', passage: "%s"' % esc(cc.get("passage"))[:130]) if cc.get("passage") else "")))
         A("")
 
+    # ------------------------------------------------------------- 3c baseline, unwitnessed
+    if baseline:
+        A("### Baseline records, origin not witnessed\n")
+        A("Written when the register was opened on an already-drafted deliverable, so the "
+          "value was not recorded at the moment it was taken from a source. These are not "
+          "verified provenance and are not counted as such. Each needs its source reopened "
+          "before the claim can be relied on.\n")
+        A("| Value | Claim as printed | Source named | Status |")
+        A("|---|---|---|---|")
+        for r in baseline:
+            A("| `%s` | %s | %s | %s |" % (
+                esc(r.get("value")), esc(r.get("as_printed"))[:120],
+                esc(r.get("doc"))[:60], esc(r.get("status"))[:60]))
+        A("")
+
     # ---------------------------------------------------------------- 4
     # Venue-neutral on purpose. A journal, a health authority, a conference and an internal
     # template all impose different limits, and this skill has no business assuming any of
@@ -230,7 +252,9 @@ def build(cfg, base, recs, src_name, coverage=None, requirements=None, metrics=N
 
     A("### 5a. Provenance records\n")
     ev = Counter(r.get("evidence", "unlabelled") for r in sourced)
-    A("- records: **%d** sourced, **%d** author-entered" % (len(sourced), len(author)))
+    A("- records: **%d** sourced, **%d** author-entered%s"
+      % (len(sourced), len(author),
+         ", **%d** baseline (origin not witnessed)" % len(baseline) if baseline else ""))
     A("- with a verbatim quote: **%d**" % sum(1 for r in sourced if r.get("quote")))
     A("- source figure differs from the printed value (rounding): **%d**"
       % sum(1 for r in sourced if r.get("source_value") not in (None, r.get("value"))))

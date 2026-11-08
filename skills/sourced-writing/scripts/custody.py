@@ -45,9 +45,30 @@ def stable_id(section: str, value: str, clause: str) -> str:
     added anywhere above, so "the same id" never meant the same value twice. Hashing the
     value together with its section and surrounding clause means the id changes only when the
     claim itself changes, which is exactly when a superseding record is wanted.
+
+    Collision bound, stated rather than hidden: the key truncates the clause at 200 normalized
+    characters and the digest at 10 hex (40 bits). Two DIFFERENT claims therefore share an id
+    when they agree on section, value and the first 200 characters of clause, and in that case
+    collapse_latest() would silently drop one. That is why clause_sha() exists and why
+    collapse_latest() refuses rather than guesses.
+
+    **This function's output is frozen.** It is not merely a hash, it is recorded in live
+    registers: 1,189 ids across three deliverables at the time of writing. Widening the window
+    or the digest recomputes a different id for an unchanged claim, so appending a correction
+    would stop superseding and both records would go live. Detect collisions instead.
     """
     key = "%s|%s|%s" % (_flat(section), _flat(value), _flat(clause)[:200])
     return "p" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+
+
+def clause_sha(clause: str) -> str:
+    """Digest of the WHOLE clause, untruncated. Distinguishes a collision from a correction.
+
+    Two records sharing an id agree on section, value and clause[:200] by construction. If
+    they also agree here they are the same claim, so the later one is a correction. If they
+    disagree they are different claims that collided, which is the case stable_id cannot see.
+    """
+    return hashlib.sha256(_flat(clause).encode("utf-8")).hexdigest()[:16]
 
 
 # ------------------------------------------------------------------ rounding + context
@@ -104,6 +125,14 @@ def endpoints(value):
 # Separator characters a source may use between two endpoints, including the figure dash
 # and en dash that PDF extraction produces.
 _SEP = r"(?:to|\u2010|\u2011|\u2012|\u2013|\u2014|\u2212|-|,)"   # incl. MINUS SIGN from PDFs
+
+# What may legitimately sit BETWEEN the two endpoints of an interval in a source: bracket and
+# CI furniture, one separator, and at most one unit word on either side ("1.6 mg to 45 mg").
+# No digits, no sentence boundary, no prose. See resolve_interval for why this is enforced.
+_BETWEEN = re.compile(
+    r"^[\s\]\)%]*(?:CI)?[\s:=\[\(]*(?:[^\W\d_]{1,8}\s*)?"
+    + _SEP +
+    r"[\s\[\(]*(?:[^\W\d_]{1,8}\s+)?$", re.I)
 _LOOSE = re.compile(r"^([\d.]+)\s*[A-Za-z\u00b5/%]*\s*" + _SEP + r"\s*([\d.]+)\s*[A-Za-z\u00b5\u00b7/%]*$")
 
 
@@ -148,6 +177,14 @@ def resolve_interval(value, sources, want, span=48):
     decimals adjacent in one clause is not something that happens by coincidence, which is
     the same reason the scorer counts co-occurring figures.
 
+    Proximity alone is not enough, and treating it as enough produced a fabricated defect.
+    "21 to 28 days" matched a source reading "21 day cycle): 1 mg D1, 2 mg D8 and 30 mg D15.
+    28", 44 characters apart across a sentence boundary, and the whole intervening span came
+    back as the source value; verification then read that span as a rounding parent. The two
+    endpoints of an interval are joined by interval punctuation and at most a unit word, so
+    _BETWEEN is checked as well as the distance. Widen the separator alphabet if a real form
+    is rejected; never widen the window.
+
     Returns (source_text, score, window, ref) or None.
     """
     pair = endpoints(value)
@@ -160,6 +197,8 @@ def resolve_interval(value, sources, want, span=48):
             tail = text[mm.end():mm.end() + span]
             hm = re.search(r"(?<![\d.])" + re.escape(hi) + r"(?![\d.])", tail)
             if not hm:
+                continue
+            if not _BETWEEN.match(tail[:hm.start()]):
                 continue
             win = text[max(0, mm.start() - 200):mm.end() + span + 200]
             score = len(want & words(win)) + 2      # both bounds present is itself evidence
@@ -336,19 +375,50 @@ def assert_append_only(path, prior_lines):
                              % (len(prior_lines) - len(now)))
 
 
-def collapse_latest(records):
-    """Last record wins per id, preserving first-seen order."""
+def collapse_latest(records, *, changes=None):
+    """Last record wins per id, preserving first-seen order.
+
+    Raises on an id collision, meaning two records that share an id but carry different
+    `clause_sha`. Those are different claims, not a correction, and collapsing them would
+    silently drop one: the exact silent loss a custody trail exists to prevent. Records with
+    no `clause_sha` (everything written before the field existed) skip the check, so live
+    registers keep loading unchanged.
+
+    Pass `changes` as a dict to receive {id: [fields that differ]} for every supersede, which
+    is what content_key() is for: it reports WHAT a correction changed instead of only that
+    one happened.
+    """
     order, latest = [], {}
-    for r in records:
-        if r["id"] not in latest:
-            order.append(r["id"])
-        latest[r["id"]] = r
+    for n, r in enumerate(records, 1):
+        rid = r.get("id")
+        if rid is None:
+            raise ValueError("record %d has no id: %.120s" % (n, json.dumps(r, default=str)))
+        prev = latest.get(rid)
+        if prev is None:
+            order.append(rid)
+        else:
+            a, b = prev.get("clause_sha"), r.get("clause_sha")
+            if a and b and a != b:
+                raise ValueError(
+                    "id collision on %s: two different claims hash to one id "
+                    "(clause_sha %s vs %s). stable_id truncates the clause at 200 characters, "
+                    "so distinct claims sharing a section, a value and that prefix collide. "
+                    "Give one of them a distinct id rather than letting a record be dropped."
+                    % (rid, a, b))
+            if changes is not None:
+                changes[rid] = [k for k in _KEY_FIELDS if prev.get(k) != r.get(k)]
+        latest[rid] = r
     return [latest[i] for i in order]
 
 
+_KEY_FIELDS = ("value", "source_value", "as_printed", "doc", "doc_path",
+               "ref", "locator", "url", "quote")
+
+
 def content_key(r):
-    """What makes a record different enough to supersede its predecessor."""
-    return json.dumps({k: r.get(k) for k in
-                       ("value", "source_value", "as_printed", "doc", "doc_path",
-                        "ref", "locator", "url", "quote")},
+    """What makes a record different enough to supersede its predecessor.
+
+    Used by collapse_latest(changes=...) to name the fields a correction actually changed.
+    """
+    return json.dumps({k: r.get(k) for k in _KEY_FIELDS},
                       sort_keys=True, ensure_ascii=False)

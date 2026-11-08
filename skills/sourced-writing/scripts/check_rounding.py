@@ -51,8 +51,31 @@ STOP = set(
     'patient median value values levels higher lower more less between during across both other '
     'same each any all section table figure months days weeks year years dose doses'.split())
 
-NUM = re.compile(r'(?<![\w.])(\d{1,4}(?:,\d{3})*(?:\.\d+)?)\s*(%|mg/kg|mg|L/day|µg/mL|mL|L|'
-                 r'days|day|months|month|weeks|week|years|patients)?')
+# Both boundaries are load-bearing, and the right one was missing until a review caught it.
+# `\d{1,4}` with no right-hand guard captures "1234" out of "12345", and the exact-match branch
+# of all_occurrences() then confirms a value that the source never prints: the digit-anywhere
+# failure this whole module exists to stop, reintroduced inside the matcher itself. So:
+#   (?<![\w.])  not mid-word, and not the tail of a longer decimal ("6" of "42.6")
+#   (?!\d)      not the head of a longer number ("1234" of "12345")
+# The digit run is also widened from {1,4} to + because truncating a 5-digit number to its
+# first 4 was the mechanism of the bug, not merely its symptom.
+#
+# The right guard blocks a following DIGIT only, never a following comma. `(?![\d,])` looks
+# tighter and is wrong: a comma after a decimal is ordinary punctuation, so in the interval
+# "0.940 (0.908, 0.974)" it refuses "0.908" and captures a bare "0" instead. That silently cost
+# 12 confirmed quotes and invented a defect on a real manuscript corpus before the before/after
+# diff caught it. Thousands groups are already handled by (?:,\d{3})*.
+#
+# Currency: the symbol rides in group 1 (dec() strips it) and the magnitude suffix joins the
+# unit alternation, so "$1.2M" no longer reads as a bare 1.2 that matches unrelated 1.2s six
+# orders of magnitude away. The group COUNT is deliberately still two: NUM.findall() is
+# unpacked as `for x, _ in ...` in two places, so a third group would break both silently.
+# The \b binds only the alphabetic alternatives; putting it after `%` would require a word
+# character to follow the percent sign and break every "42.6% higher" in the corpus.
+NUM = re.compile(r'(?<![\w.])([$€£]?\d+(?:,\d{3})*(?:\.\d+)?)(?!\d)\s*'
+                 r'(%|mg/kg|mg|L/day|µg/mL|mL|L|'
+                 r'(?:days|day|months|month|weeks|week|years|patients|'
+                 r'M|B|K|bn|mn|million|billion)\b)?')
 
 MIN_CONTEXT = 3   # score required to call an occurrence "the right one"
 
@@ -102,9 +125,50 @@ def load_config(path: Path) -> tuple[dict, Path]:
 
 
 def norm(s: str) -> str:
+    """Normalize SOURCE POOL text for scoring. Deliberately not the same as
+    verify_provenance.norm(), which additionally folds dashes and quotes and casefolds for
+    quote matching. This one must not casefold: words() feeds the context scorer and the
+    scorer was tuned against this exact normalization. Keep them separate on purpose.
+    """
     s = unicodedata.normalize('NFKC', s)
     s = re.sub(r'(?<=\d)·(?=\d)', '.', s)      # Lancet sets the decimal point as a middle dot
     return re.sub(r'\s+', ' ', s)
+
+
+# A token immediately after a number, whatever it is. NUM's own unit group recognizes only a
+# short whitelist, so the mismatch guard below needs to see units outside it: without that,
+# a source's "50 ng" satisfies a manuscript's "50 mg".
+TRAILING = re.compile(r'\s*([A-Za-zµ%][A-Za-z0-9µ·/%]*)')
+
+# The vocabulary the mismatch guard is allowed to reason about. A trailing token outside it is
+# treated as "no unit stated", NOT as a conflicting unit, and that distinction is the whole
+# design: sources habitually write "10.9 and 10.1 months", where the token after 10.9 is the
+# word "and". Firing on any trailing word rejected three true exact quotes across the
+# two oncology manuscript corpora before the
+# before/after diff caught it. Only fire when BOTH sides name a unit this set knows and they
+# disagree; otherwise fall through and let the context scorer decide, which is what the
+# original code did and is the safe default.
+UNITS = {
+    '%', 'mg', 'g', 'kg', 'µg', 'ug', 'mcg', 'ng', 'pg',
+    'l', 'ml', 'dl', 'µl', 'ul',
+    'mg/kg', 'mg/ml', 'µg/ml', 'ug/ml', 'ng/ml', 'g/l', 'l/day', 'ml/min',
+    'mmol/l', 'mol/l', 'nm', 'µm', 'mm',
+    'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
+    'h', 'hr', 'hrs', 'hour', 'hours', 'min', 'mins', 'minute', 'minutes',
+    'patients', 'm', 'b', 'k', 'bn', 'mn', 'million', 'billion',
+}
+
+
+def trailing_token(text: str, end: int):
+    """The raw token following a numeric match, or None. Whitelist-independent."""
+    m = TRAILING.match(text, end)
+    return m.group(1) if m else None
+
+
+def unit_key(tok):
+    """Normalized unit if `tok` is one this guard recognizes, else None (meaning 'unknown')."""
+    t = (tok or '').strip().casefold()
+    return t if t in UNITS else None
 
 
 def words(s: str) -> set:
@@ -112,33 +176,76 @@ def words(s: str) -> set:
 
 
 def dec(s: str):
+    # NUM group 1 may carry a leading currency symbol; strip it here so every caller that
+    # turns a captured token into a number keeps working unchanged.
     try:
-        return Decimal(s.replace(',', ''))
+        return Decimal(s.replace(',', '').lstrip('$€£'))
     except InvalidOperation:
         return None
 
 
-def load_pool(cfg: dict, base: Path) -> dict:
-    """reference number -> searchable source text."""
-    pool = {}
+def _read_all(files, base: Path, ref: str, kind: str) -> list:
+    texts, missing = [], []
+    for f in files:
+        p = base / f
+        texts.append(p.read_text(errors='replace')) if p.exists() else missing.append(f)
+    if missing:
+        print(f'  warning: ref {ref} missing {kind} source(s): {", ".join(missing)}',
+              file=sys.stderr)
+    return texts
+
+
+def load_pool(cfg: dict, base: Path) -> tuple[dict, dict]:
+    """(authoritative, supporting), each reference number -> searchable source text.
+
+    **A reference number names one document, not a folder of related ones.** Before the
+    `references` register existed this function concatenated every file mapped to a reference
+    into a single pool, so a value present only in an agency *review* of a label was reported
+    as confirmed against a reference that is the label itself. Two real claims passed that way:
+    a pre-specified non-inferiority threshold and a secondary endpoint, neither of which appears
+    anywhere in the cited Prescribing Information.
+
+    Only `authoritative` text can confirm. `supporting` text is still loaded, because knowing a
+    value came from the agency review rather than the label is far more useful than reporting it
+    as unsourced.
+    """
+    auth, support = {}, {}
     cache_path = base / cfg['cache']
     if cache_path.exists():
         for ref, v in json.loads(cache_path.read_text()).items():
-            pool[ref] = norm((v.get('abstract') or '') + ' ' + (v.get('fulltext') or ''))
+            auth[ref] = norm((v.get('abstract') or '') + ' ' + (v.get('fulltext') or ''))
+
+    reg = cfg.get('references') or {}
     for ref, files in cfg['local_sources'].items():
-        texts = [(base / f).read_text(errors='replace') for f in files if (base / f).exists()]
-        missing = [f for f in files if not (base / f).exists()]
-        if missing:
-            print(f'  warning: ref {ref} missing local source(s): {", ".join(missing)}',
-                  file=sys.stderr)
+        if ref in reg:
+            continue                      # the register governs this reference
+        texts = _read_all(files, base, ref, 'local')
         if texts:
-            pool[ref] = norm(' '.join(texts))
-    if not pool:
-        sys.exit('no sources loaded: check `cache` and `local_sources` in sourcing.json')
-    return pool
+            auth[ref] = norm(' '.join(texts))
+        # Silent today, visible from now on: more than one file behind one reference number is
+        # exactly the condition under which a quote can be confirmed against the wrong document.
+        if len(files) > 1:
+            print(f'  warning: ref {ref} pools {len(files)} files with no `references` entry, so '
+                  f'a quote in any of them will confirm it: {", ".join(files)}', file=sys.stderr)
+
+    for ref, spec in reg.items():
+        a = _read_all(spec.get('authoritative') or [], base, ref, 'authoritative')
+        s = _read_all(spec.get('supporting') or [], base, ref, 'supporting')
+        if a:
+            auth[ref] = norm(' '.join(a))
+        else:
+            print(f'  warning: ref {ref} is registered but no authoritative source was readable; '
+                  f'nothing can be confirmed against it', file=sys.stderr)
+        if s:
+            support[ref] = norm(' '.join(s))
+
+    if not auth and not support:
+        sys.exit('no sources loaded: check `cache`, `local_sources` and `references` in '
+                 'sourcing.json')
+    return auth, support
 
 
-def statements(md: str, refs_heading: str, patterns):
+def statements(md: str, refs_heading: str, patterns, *, include_uncited: bool = False):
     """Yield (sentence, [cited refs]) over body, abstract, boxed elements, tables, legends.
 
     Works on PARAGRAPHS, not lines. A hard-wrapped manuscript splits one sentence across
@@ -146,6 +253,12 @@ def statements(md: str, refs_heading: str, patterns):
     content words to score, so real defects report as "no contextual match" instead of as
     defects. That silent degradation is exactly the failure mode this tool exists to catch,
     so it must not depend on how the author happens to wrap text.
+
+    `include_uncited` yields sentences carrying no citation at all, with an empty ref list.
+    Rounding checks do not want those: with no cited source there is nothing to compare against.
+    Coverage checks want exactly those, because a value with no citation is the gap they exist to
+    find, and an extractor that silently skipped them would make `check_coverage` report a clean
+    sheet over the very defects it was written for. One extractor, one set of rules, one flag.
     """
     parts = md.split(refs_heading)
     body = parts[0] + (parts[-1].split('\n##', 1)[-1] if len(parts) > 1 else '')
@@ -174,7 +287,7 @@ def statements(md: str, refs_heading: str, patterns):
         for unit in units:
             for sent in re.split(r'(?<=[.;])\s+(?=[A-Z(])', unit):
                 refs = cited_refs(sent, patterns)
-                if refs:
+                if refs or include_uncited:
                     yield sent, refs
 
 
@@ -220,8 +333,15 @@ def all_occurrences(value: str, unit, sources, want, exact: bool, siblings=()):
                         continue
                 except InvalidOperation:
                     continue
-            if unit and m.group(2) and unit != m.group(2):
-                continue
+            # Unit mismatch, fired only when both sides name a unit UNITS knows and they
+            # disagree. m.group(2) alone no-ops for every unit outside its short whitelist,
+            # which let a source's "50 ng" satisfy a manuscript's "50 mg"; an unrecognized
+            # trailing token means "no unit stated" and falls through to the context scorer.
+            claim_unit = unit_key(unit)
+            if claim_unit:
+                src_unit = unit_key(m.group(2) or trailing_token(text, m.end()))
+                if src_unit and claim_unit != src_unit:
+                    continue
             win = text[max(0, m.start() - 200):m.start() + 200]
             wnums = {x for x, _ in NUM.findall(win)}
             score = len(want & words(win)) + sum(1 for s in siblings if s in wnums)
@@ -256,15 +376,16 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg, base = load_config(Path(args.config))
-    pool = load_pool(cfg, base)
+    auth, support = load_pool(cfg, base)
     md = (base / cfg['manuscript']).read_text()
 
-    defects, approx, quoted, unmatched = [], [], 0, []
+    defects, approx, quoted, unmatched, misattributed = [], [], 0, [], []
 
     patterns = cfg['citation_patterns']
     for sent, refs in statements(md, cfg['references_heading'], patterns):
-        srcs = [(r, pool[r]) for r in refs if r in pool]
-        if not srcs:
+        srcs = [(r, auth[r]) for r in refs if r in auth]
+        sup = [(r, support[r]) for r in refs if r in support]
+        if not srcs and not sup:
             continue
         want = words(sent)
         # Citation markers are reference numbers, not claim values.
@@ -289,7 +410,15 @@ def main() -> int:
                 (approx if ALLOW_APPROX.search(ctx) else defects).append(
                     (printed, unit, parent, sent))
             else:
-                unmatched.append((printed, unit, refs, sent))
+                # Absent from every cited reference. If it sits in a *supporting* document of one
+                # of them, the citation points at the wrong document: a defect, not a gap. Saying
+                # "unsourced" here would be wrong and would get dismissed as noise.
+                mis = (best_occurrence(printed, unit, sup, want, exact=True, siblings=siblings)
+                       if sup else None)
+                if mis and mis[0] >= MIN_CONTEXT:
+                    misattributed.append((printed, unit, mis, sent))
+                else:
+                    unmatched.append((printed, unit, refs, sent))
 
     known = load_adjudications(base, cfg)
     open_defects, dismissed = [], []
@@ -299,6 +428,7 @@ def main() -> int:
 
     print(f'exact quotes confirmed in context : {quoted}')
     print(f'OPEN ROUNDING DEFECTS             : {len(open_defects)}')
+    print(f'WRONG DOCUMENT FOR THE CITATION   : {len(misattributed)}')
     print(f'adjudicated, quote on file        : {len(dismissed)}')
     print(f'source-stated approximations, ok  : {len(approx)}')
     print(f'no contextual match either way    : {len(unmatched)}')
@@ -308,12 +438,19 @@ def main() -> int:
         print(f'  claim : {sent[:150]}')
         print(f'  source: ...{win[120:300].strip()}...')
 
+    for printed, unit, (ov, sv, ref, win), sent in misattributed:
+        print(f'\nWRONG DOCUMENT  {printed}{unit or ""}  is not in reference {ref}; it is in a '
+              f'supporting document of it  [score {ov}]')
+        print(f'  claim : {sent[:150]}')
+        print(f'  found : ...{win[120:300].strip()}...')
+        print(f'  fix   : cite the document that contains it, or drop the claim.')
+
     if args.unmatched:
         print('\n--- no contextual match, needs sourcing by hand ---')
         for printed, unit, refs, sent in unmatched:
             print(f'  {printed}{unit or "":<8} refs {refs}  {sent[:110]}')
 
-    return 1 if (args.check and open_defects) else 0
+    return 1 if (args.check and (open_defects or misattributed)) else 0
 
 
 if __name__ == '__main__':

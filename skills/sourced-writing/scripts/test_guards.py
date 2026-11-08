@@ -14,6 +14,7 @@ Fixtures only. Nothing here reads or writes the live manuscript files.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -213,6 +214,29 @@ check("endpoints far apart do not resolve as a range",
       resolve_interval("1.6 to 45 mg", SPLIT, words("cohort")) is None,
       str(resolve_interval("1.6 to 45 mg", SPLIT, words("cohort")))[:90])
 
+# --------------------------------------------------------------------------
+# 5e. Fixture 4. Proximity is not a separator. Two endpoints 44 characters apart, with a
+#     sentence boundary and four other figures between them, were accepted as an interval
+#     and the whole intervening span returned as the source value. Verification then read
+#     that span as a rounding parent and reported a defect that did not exist. An interval's
+#     endpoints are joined by interval punctuation and nothing else.
+#     (Synthetic, reconstructed to preserve the shape of the failure.)
+# --------------------------------------------------------------------------
+NOTSEP = [(8, "Cohort A: Cycle 1 (step-up dosing, 21 day cycle): 1 mg D1, 2 mg D8 and "
+              "30 mg D15. 28 day Cycle 2-12: 30 mg D1.")]
+check("two figures separated by prose are not an interval",
+      resolve_interval("21 to 28 days", NOTSEP, words("cycle dosing step up")) is None,
+      str(resolve_interval("21 to 28 days", NOTSEP, words("cycle dosing step up")))[:110])
+
+NODIG = [(8, "values of 21 and 30 and 28 were recorded")]
+check("an intervening third figure blocks an interval match",
+      resolve_interval("21 to 28", NODIG, words("values recorded")) is None,
+      str(resolve_interval("21 to 28", NODIG, words("values recorded")))[:110])
+
+check("a legitimate separator with words still resolves",
+      resolve_interval("49.1 to 70.2", [(11, "the 95% CI was 49.1 to 70.2 overall")],
+                       words("overall")) is not None)
+
 check("two renderings of one interval compare equal",
       same_interval("0 to 84 days", "0-84") and same_interval("95% CI 49.1 to 70.2", "49.1-70.2"))
 check("different intervals never compare equal",
@@ -314,6 +338,264 @@ for f in cands:
     check("%s does not hardcode source_value = value" % f.parent.parent.name[:28],
           '"source_value": value,' not in src,
           "found the literal hardcode that defeats the ROUND check")
+
+# --------------------------------------------------------------------------
+# 8. Defects found by review of this skill itself. Every case below is a bug that shipped in
+#    the first version of these scripts, which is the same bar as every case above.
+#    The suite previously imported only from custody, which is exactly why the bugs in
+#    provenance.py and verify_provenance.py went unseen here. These import those modules.
+# --------------------------------------------------------------------------
+import subprocess  # noqa: E402
+
+from check_rounding import NUM, all_occurrences, dec, unit_key  # noqa: E402
+from custody import clause_sha  # noqa: E402
+from provenance import _forget_seq_cache, _same_figure, record  # noqa: E402
+from verify_provenance import appears_as_number, value_in_quote  # noqa: E402
+
+
+def raises_valueerror(fn):
+    try:
+        fn()
+        return False
+    except ValueError:
+        return True
+
+
+# -- the number regex had no right-hand boundary -----------------------------
+check("a 5-digit number is captured whole, not truncated to its first 4",
+      [x for x, _ in NUM.findall("12345")] == ["12345"], str(NUM.findall("12345")))
+_src = [("9", "the cohort enrolled 12345 participants overall in the pooled analysis set")]
+_w = words("a total of 1234 participants were enrolled in the pooled analysis set cohort")
+check("1234 is NOT confirmed against a source that only prints 12345",
+      all_occurrences("1234", None, _src, _w, True) == [],
+      "the digit-anywhere failure, reintroduced inside the matcher")
+# ... and the guard must block a following digit only, never a comma. A comma after a decimal
+# is ordinary punctuation, and blocking it silently cost 12 confirmed quotes on a live corpus.
+check("a comma-separated interval still yields both endpoints",
+      [x for x, _ in NUM.findall("0.940 (0.908, 0.974)")] == ["0.940", "0.908", "0.974"],
+      str(NUM.findall("0.940 (0.908, 0.974)")))
+check("a thousands separator still parses as one number",
+      [x for x, _ in NUM.findall("1,234 patients")] == ["1,234"])
+
+# -- currency was captured as a bare number ---------------------------------
+check("a currency magnitude suffix is captured, not dropped",
+      NUM.findall("$1.2M revenue") == [("$1.2", "M")], str(NUM.findall("$1.2M revenue")))
+check("dec() strips a currency symbol so callers still get a number", dec("$1.2") == dec("1.2"))
+
+# -- the unit guard no-opped outside a 10-item whitelist --------------------
+_ng = [("9", "steady state trough concentration was 50 ng per mL in the pooled analysis cohort set")]
+_wng = words("the dose was 50 mg in the pooled analysis cohort set steady state")
+check("a source's 50 ng does not satisfy a manuscript's 50 mg",
+      all_occurrences("50", "mg", _ng, _wng, True) == [])
+check("a matching unit is still accepted (the guard is not merely strict)",
+      all_occurrences("50", "ng", _ng, _wng, True) != [])
+check("an ordinary trailing word is not treated as a conflicting unit",
+      unit_key("and") is None and unit_key("ng") == "ng",
+      "firing on any trailing word rejected 3 true quotes on live corpora")
+
+# -- the VALUE check was plain substring containment ------------------------
+check("source_value 2.6 is NOT found in a quote reading 42.6",
+      not appears_as_number("2.6", "median marker 42.6 in the treated arm"))
+check("source_value 50 is NOT found in a quote reading 50.5",
+      not appears_as_number("50", "exposure was 50.5 units"))
+check("a number ending a sentence is still found",
+      appears_as_number("50", "the observed value was 50."))
+check("the figure the quote really does state is still found",
+      appears_as_number("42.6", "median marker 42.6 in the treated arm"))
+# Non-numeric claims are supported and in live use, so the numeric rule must not apply to them.
+check("a prose source_value is matched by containment, not by the numeric rule",
+      value_in_quote("no more popPK analysis will be done after DBL",
+                     "Confirmed: no more popPK analysis will be done after DBL."))
+check("a prose source_value absent from the quote still fails",
+      not value_in_quote("no more popPK analysis will be done", "Analysis is ongoing."))
+
+# -- the write-time guard rejected its own documented example ---------------
+check("value 42.6% is accepted against source_value 42.6 (unit only)",
+      _same_figure("42.6%", "42.6"))
+check("a rounded value is still refused at write time", not _same_figure("43", "42.6"))
+check("trailing zeros are still data, not formatting", not _same_figure("7.10", "7.1"))
+check("one interval written two ways is accepted", _same_figure("5.9-8.7", "5.9 to 8.7"))
+check("two different prose claims are still refused", not _same_figure("increased", "decreased"),
+      "digit comparison alone makes every non-numeric pair equal")
+
+# -- records with no doc_path counted as verified ---------------------------
+VP = str(Path(__file__).resolve().parent / "verify_provenance.py")
+with tempfile.TemporaryDirectory() as td:
+    jl = Path(td) / "provenance.jsonl"
+    jl.write_text("".join(json.dumps({
+        "id": "p%02d" % i, "value": "42.6", "source_value": "42.6",
+        "as_printed": "42.6 in the treated arm", "doc": "Falk 2021",
+        "url": "https://example.org", "locator": "Table 2",
+        "quote": "median marker 42.6 in the treated arm", "retrieved": "2026-09-17",
+    }) + "\n" for i in range(5)), encoding="utf-8")
+    out = subprocess.run([sys.executable, VP, str(jl)], capture_output=True, text=True)
+    check("5 records with no doc_path report 0 verified, not 5",
+          "0/5 verified" in out.stdout, out.stdout.strip()[-200:])
+    check("...and they are still reported, not dropped", "5 unverifiable" in out.stdout)
+    strict = subprocess.run([sys.executable, VP, str(jl), "--strict"],
+                            capture_output=True, text=True)
+    check("--strict exits non-zero when nothing could be opened", strict.returncode != 0)
+    bad = Path(td) / "bad.jsonl"
+    bad.write_text(json.dumps({"id": "pq", "value": "1"}) + "\n", encoding="utf-8")
+    mal = subprocess.run([sys.executable, VP, str(bad)], capture_output=True, text=True)
+    check("a record missing required fields is named, not a bare KeyError",
+          "MALFORMED" in mal.stderr and "KeyError" not in mal.stderr, mal.stderr[-160:])
+
+# -- id collisions were silently dropped -----------------------------------
+_a = {"id": "px", "value": "1", "clause_sha": clause_sha("one clause")}
+_b = {"id": "px", "value": "2", "clause_sha": clause_sha("a different clause")}
+check("two different claims sharing one id are refused, not collapsed",
+      raises_valueerror(lambda: collapse_latest([_a, _b])))
+check("a genuine correction under the same id still supersedes",
+      [r["value"] for r in collapse_latest([_a, dict(_b, clause_sha=_a["clause_sha"])])] == ["2"])
+check("a record with no id reports itself rather than raising KeyError",
+      raises_valueerror(lambda: collapse_latest([{"value": "1"}])))
+check("legacy records without clause_sha still load",
+      [r["value"] for r in collapse_latest([{"id": "py", "value": "1"},
+                                            {"id": "py", "value": "2"}])] == ["2"])
+_chg = {}
+collapse_latest([{"id": "pz", "value": "1", "quote": "a"},
+                 {"id": "pz", "value": "2", "quote": "a"}], changes=_chg)
+check("a supersede reports which fields changed (content_key is no longer dead)",
+      _chg.get("pz") == ["value"], str(_chg))
+
+# -- _next_seq was O(n^2) and is now cached: ids must stay byte-identical ---
+_REC = dict(value="42.6", source_value="42.6", as_printed="42.6 in the treated arm",
+            doc="Falk 2021", url="https://example.org", locator="Table 2",
+            quote="median marker 42.6")
+with tempfile.TemporaryDirectory() as td:
+    jl = Path(td) / "p.jsonl"
+    _forget_seq_cache()
+    ids = [record(path=jl, **_REC)["id"] for _ in range(4)]
+    check("cached sequential ids are still dense and in order",
+          ids == ["p0001", "p0002", "p0003", "p0004"], str(ids))
+    _forget_seq_cache()
+    check("a cold cache re-seeds from the file and does not restart at 1",
+          record(path=jl, **_REC)["id"] == "p0005")
+
+# --------------------------------------------------------------------------
+# A reference number is a document, not a folder of related ones.
+#
+# `local_sources` let one reference map to many files and pooled them into a single searchable
+# string, so a value present only in an agency *review* of a label was reported as confirmed
+# against a reference that is the label. Two real claims passed that way on a live review: a
+# pre-specified non-inferiority threshold and a secondary endpoint, neither of which appears
+# anywhere in the cited Prescribing Information. A reviewer found both by reading.
+# --------------------------------------------------------------------------
+CR = str(Path(__file__).resolve().parent / "check_rounding.py")
+CC = str(Path(__file__).resolve().parent / "check_coverage.py")
+
+LABEL = ("the geometric mean ratio (GMR) (90% CI) for cycle 1 ctrough was 1.05 (0.88, 1.24) "
+         "and auc0-21days was 0.87 (0.83, 0.92); the steady state ctrough was 1.15 (1.05, 1.26).")
+REVIEW = ("the lower bound of the 90% ci for the pre-specified geometric mean ratio (gmr) was "
+          "0.8. the gmr for aucinf at cycle 1 value was 0.97 (90% ci: 0.91, 1.05).")
+
+
+def _project(td, body, *, register, nac=None, prov=None):
+    d = Path(td)
+    (d / "label.txt").write_text(LABEL, encoding="utf-8")
+    (d / "review.txt").write_text(REVIEW, encoding="utf-8")
+    cfg = {"manuscript": "m.md", "cache": "absent.json",
+           "local_sources": {"3": ["label.txt", "review.txt"]}}
+    if register:
+        cfg["references"] = {"3": {"is": "the label", "authoritative": ["label.txt"],
+                                   "supporting": ["review.txt"]}}
+    (d / "sourcing.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (d / "m.md").write_text(body + "\n\n## References\n\n3. The label.\n", encoding="utf-8")
+    if nac is not None:
+        (d / "not_a_claim.json").write_text(json.dumps(nac), encoding="utf-8")
+    if prov is not None:
+        (d / "provenance.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in prov), encoding="utf-8")
+    return str(d / "sourcing.json")
+
+
+# the exact claim that slipped through: a secondary endpoint only the agency review carries
+AUCINF = "The Cycle 1 AUCinf GMR was 0.97 (90% CI 0.91 to 1.05) (3)."
+with tempfile.TemporaryDirectory() as td:
+    cfgp = _project(td, AUCINF, register=True)
+    out = subprocess.run([sys.executable, CR, "--config", cfgp, "--check"],
+                         capture_output=True, text=True)
+    nwrong = re.search(r"WRONG DOCUMENT FOR THE CITATION   : (\d+)", out.stdout)
+    # 0.97 appears only in the review. 1.05 legitimately appears in the label too, as part of
+    # "1.15 (1.05, 1.26)", so the confirmed count is not expected to be zero: what matters is
+    # that the value the label does NOT carry is the one reported as the wrong document.
+    check("a value only in a supporting document is NOT confirmed for the cited reference",
+          bool(nwrong) and int(nwrong.group(1)) > 0
+          and "WRONG DOCUMENT  0.97" in out.stdout,
+          out.stdout.strip()[-260:])
+    check("...and --check exits non-zero on it", out.returncode != 0)
+    check("...and it is named as the wrong document, not reported as unsourced",
+          "is not in reference 3" in out.stdout, out.stdout.strip()[-200:])
+
+# negative control: the guard must not refuse a value the cited reference genuinely contains
+with tempfile.TemporaryDirectory() as td:
+    cfgp = _project(td, "Cycle 1 AUC0-21days GMR was 0.87 (90% CI 0.83 to 0.92) (3).",
+                    register=True)
+    out = subprocess.run([sys.executable, CR, "--config", cfgp, "--check"],
+                         capture_output=True, text=True)
+    m = re.search(r"exact quotes confirmed in context : (\d+)", out.stdout)
+    check("a value genuinely in the authoritative document still confirms",
+          bool(m) and int(m.group(1)) > 0
+          and "WRONG DOCUMENT FOR THE CITATION   : 0" in out.stdout,
+          out.stdout.strip()[-200:])
+    check("...and that run exits clean", out.returncode == 0)
+
+# negative control: a project with no register keeps working, and says why that is a risk
+with tempfile.TemporaryDirectory() as td:
+    cfgp = _project(td, AUCINF, register=False)
+    out = subprocess.run([sys.executable, CR, "--config", cfgp], capture_output=True, text=True)
+    check("with no `references` entry the old pooling behaviour is preserved",
+          "WRONG DOCUMENT FOR THE CITATION   : 0" in out.stdout
+          and "exact quotes confirmed in context : 0" not in out.stdout,
+          out.stdout.strip()[-200:])
+    check("...but a multi-file reference now warns instead of staying silent",
+          "pools 2 files with no `references` entry" in out.stderr, out.stderr.strip()[-200:])
+
+# the same hole from the record side: a quote in *some* file proved nothing about the reference
+with tempfile.TemporaryDirectory() as td:
+    cfgp = _project(td, AUCINF, register=True)
+    jl = Path(td) / "p.jsonl"
+    jl.write_text(json.dumps({
+        "id": "p0001", "value": "0.97", "source_value": "0.97", "ref": 3,
+        "as_printed": "Cycle 1 AUCinf GMR 0.97", "doc": "the label", "locator": "s12.3",
+        "url": "https://example.org", "doc_path": "review.txt", "retrieved": "2026-11-07",
+        "quote": "the gmr for aucinf at cycle 1 value was 0.97 (90% ci: 0.91, 1.05)."}) + "\n",
+        encoding="utf-8")
+    out = subprocess.run([sys.executable, VP, str(jl), "--config", cfgp],
+                         capture_output=True, text=True)
+    check("a record whose doc_path is not the cited reference fails REF",
+          "REF" in out.stdout and out.returncode != 0, out.stdout.strip()[-240:])
+    out2 = subprocess.run([sys.executable, VP, str(jl)], capture_output=True, text=True)
+    check("...and without --config the record still verifies, so old logs are unaffected",
+          out2.returncode == 0, out2.stdout.strip()[-200:])
+
+# --------------------------------------------------------------------------
+# Coverage was documented as closed and enforced by nothing. An uncited "22%" and an uncited
+# "approximately 4500 patients across 12 trials" sat in a manuscript that passed every gate.
+# --------------------------------------------------------------------------
+CLAIM22 = "The maximum decrease in clearance with time was 22.4%."
+_REC22 = {"id": "p1", "value": "22.4", "source_value": "22.4", "ref": 3,
+          "as_printed": "22.4%", "doc": "d", "locator": "l", "quote": "q", "url": "u"}
+for name, nac, prov, want_resid, want_rc in [
+        ("a value with no record and no exemption is an UNRESOLVED failure", None, None, 1, True),
+        ("a not_a_claim exemption carrying a real reason closes the value",
+         [{"value": "22.4", "where": "4.1", "why": "a count the document derives itself"}],
+         None, 0, False),
+        ("a value carried by a provenance record is covered", None, [_REC22], 0, False)]:
+    with tempfile.TemporaryDirectory() as td:
+        cfgp = _project(td, CLAIM22, register=True, nac=nac, prov=prov)
+        out = subprocess.run([sys.executable, CC, "--config", cfgp],
+                             capture_output=True, text=True)
+        check(name, (f"UNRESOLVED (no record, no exempt): {want_resid}" in out.stdout
+                     and (out.returncode != 0) == want_rc), out.stdout.strip()[-200:])
+
+with tempfile.TemporaryDirectory() as td:
+    cfgp = _project(td, CLAIM22, register=True,
+                    nac=[{"value": "22.4", "where": "4.1", "why": "   "}])
+    out = subprocess.run([sys.executable, CC, "--config", cfgp], capture_output=True, text=True)
+    check("an exemption with an empty reason is refused, not honoured",
+          "REFUSED 1" in out.stdout and out.returncode != 0, out.stdout.strip()[-200:])
 
 print()
 print("=" * 62)

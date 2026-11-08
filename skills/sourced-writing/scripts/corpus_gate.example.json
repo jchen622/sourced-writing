@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to corpus_gate.local.json and point at your own registers. The local copy names real deliverables and is not committed. `records` is a provenance.jsonl (run through verify_provenance); `config` is an optional sourcing.json (run through check_rounding --unmatched).",
+  "projects": [
+    {"name": "example-deck",      "records": "~/work/example-deck/provenance.jsonl"},
+    {"name": "example-manuscript","records": "~/work/example-ms/_build/provenance.jsonl",
+                                  "config":  "~/work/example-ms/_build/sourcing.json"}
+  ]
+}

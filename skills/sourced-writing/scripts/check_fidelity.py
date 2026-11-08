@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from custody import fidelity_flags  # noqa: E402
+from custody import collapse_latest, fidelity_flags, read_jsonl  # noqa: E402
 
 # Rough ordering of how much a flag changes the meaning of a sentence.
 WEIGHT = {"causation": 4, "inference": 3, "direction": 2, "scope": 1}
@@ -39,7 +39,10 @@ def main():
     if not p.exists():
         print("no such file: %s" % p)
         return 2
-    recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    # Collapse superseded records, the same way qc_document does. Reading the raw lines meant
+    # a corrected record was still flagged alongside its correction, so this tool and the QC
+    # worksheet disagreed about which records were live.
+    recs = collapse_latest(read_jsonl(p))
 
     rows = []
     for r in recs:

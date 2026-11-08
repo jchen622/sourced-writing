@@ -126,6 +126,40 @@ entries, every record marked `"status": "baseline, origin not witnessed"`, and t
 as the start of custody rather than as evidence. Everything appended after it is tracked
 properly, and the honest gap stays visible instead of being papered over.
 
+## A reference number is a document, not a folder
+
+`local_sources` maps a reference number to files. It accepts several, and until the `references`
+register existed it **concatenated them all into one searchable pool**, so a quote found in any
+of them counted as confirmation for that reference. On a live review, reference 3 was the
+Prescribing Information and the pool also held the agency's review of that label. Measured on
+those files:
+
+| Claim | In the label | In the agency review | Reported as confirmed for ref 3 |
+|---|---|---|---|
+| the pre-specified non-inferiority threshold | **no** | yes | **yes** |
+| the Cycle 1 AUCinf secondary endpoint | **no** | yes | **yes** |
+| the Cycle 1 AUC0-21days co-primary | yes | no | yes, correctly |
+
+Two claims passed the gate cited to a document that does not contain them. A reviewer found both
+by reading. **Register which document a reference actually is:**
+
+```json
+"references": {
+  "3": { "is": "Product X Prescribing Information",
+         "authoritative": ["../sources/label.txt"],
+         "supporting":    ["../sources/agency_review.txt"] }
+}
+```
+
+Only `authoritative` text confirms. A value found only in a supporting document is reported as
+`WRONG DOCUMENT FOR THE CITATION`, not as unsourced, because knowing it came from the review
+rather than the label is what tells you how to fix it. `verify_provenance --config sourcing.json`
+applies the same rule to records: a record citing a registered reference must have its `doc_path`
+inside that reference's authoritative list.
+
+With no register the old behaviour is kept, but any reference pooling more than one file now
+warns. That warning is the condition under which a false confirmation is possible.
+
 ## Coverage is closed, not best-effort
 
 Every value in the deliverable resolves to exactly one of two states: a provenance record, or
@@ -133,6 +167,16 @@ an explicit entry in `not_a_claim.json` giving the value, where it appears, and 
 no source (a structural label, a count the document itself derives, a credit year). A value in
 neither is a hard failure. There is no third bucket, because a silent residual is
 indistinguishable from an oversight.
+
+```bash
+python3 ~/.claude/skills/sourced-writing/scripts/check_coverage.py --config sourcing.json
+```
+
+**Run it; the rule does not enforce itself.** For a long time nothing read `not_a_claim.json` and
+this section was advice. A manuscript that passed every other gate carried an uncited percentage
+and an uncited patient count among roughly 136 unresolved values, and a reviewer found them by
+reading. An exemption whose `why` is empty is refused rather than honoured, for the same reason
+a rounding dismissal must carry its source quote.
 
 ## QC verifies records; it never searches
 
@@ -245,9 +289,18 @@ else needs building.
   "local_sources": {
     "2": ["../sources/LABEL.txt"],
     "3": ["../sources/agency_review.txt"]
+  },
+  "references": {
+    "2": { "is": "Product X Prescribing Information",
+           "authoritative": ["../sources/LABEL.txt"],
+           "supporting":    ["../sources/agency_review.txt"] }
   }
 }
 ```
+
+`references` is optional but worth filling in for any reference backed by more than one file: it
+is what stops a quote from the agency review confirming a claim cited to the label. See
+**A reference number is a document, not a folder**.
 
 `cache` is an optional `{"<ref>": {"abstract": ..., "fulltext": ...}}` map; a project with only
 local text extracts can omit it. `citation_patterns` defaults to `(1,2)`, `<sup>1,2</sup>` and
